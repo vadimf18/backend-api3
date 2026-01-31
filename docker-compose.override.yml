@@ -1,0 +1,105 @@
+version: "3.3"
+
+services:
+
+  # -----------------------------
+  # Traefik proxy
+  # -----------------------------
+  proxy:
+    ports:
+      - "80:80"      # HTTP
+      - "8090:8080"  # Traefik dashboard
+    command:
+      # Enable Docker provider
+      - --providers.docker
+      # Only use services with the label for this stack
+      - --providers.docker.constraints=Label(`traefik.constraint-label-stack`, `${TRAEFIK_TAG?Variable not set}`)
+      # Expose only explicitly labeled services
+      - --providers.docker.exposedbydefault=false
+      # Enable logs
+      - --accesslog
+      - --log
+      # Enable API and dashboard (insecure for local dev)
+      - --api
+      - --api.insecure=true
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.${STACK_NAME?Variable not set}-traefik-public-http.rule=Host(`${DOMAIN?Variable not set}`)
+      - traefik.http.services.${STACK_NAME?Variable not set}-traefik-public.loadbalancer.server.port=80
+
+  # -----------------------------
+  # PgAdmin
+  # -----------------------------
+  pgadmin:
+    ports:
+      - "5050:5050"
+
+  # -----------------------------
+  # Flower (Celery monitoring)
+  # -----------------------------
+  flower:
+    ports:
+      - "5555:5555"
+
+  # -----------------------------
+  # Backend service
+  # -----------------------------
+  backend:
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./backend/app:/app
+    environment:
+      - JUPYTER=jupyter lab --ip=0.0.0.0 --allow-root --NotebookApp.custom_display_url=http://127.0.0.1:8888
+      - SERVER_HOST=http://${DOMAIN?Variable not set}
+    build:
+      context: ./backend
+      dockerfile: backend.dockerfile
+      args:
+        INSTALL_DEV: ${INSTALL_DEV-true}
+        INSTALL_JUPYTER: ${INSTALL_JUPYTER-true}
+    command: /start-reload.sh
+    labels:
+      - traefik.enable=true
+      - traefik.constraint-label-stack=${TRAEFIK_TAG?Variable not set}
+      - traefik.http.routers.${STACK_NAME?Variable not set}-backend-http.rule=PathPrefix(`/api`) || PathPrefix(`/docs`) || PathPrefix(`/redoc`)
+      - traefik.http.services.${STACK_NAME?Variable not set}-backend.loadbalancer.server.port=80
+
+  # -----------------------------
+  # Celery worker
+  # -----------------------------
+  celeryworker:
+    volumes:
+      - ./backend/app:/app
+    environment:
+      - RUN=celery worker -A app.worker -l info -Q main-queue -c 1
+      - JUPYTER=jupyter lab --ip=0.0.0.0 --allow-root --NotebookApp.custom_display_url=http://127.0.0.1:8888
+      - SERVER_HOST=http://${DOMAIN?Variable not set}
+    build:
+      context: ./backend
+      dockerfile: celeryworker.dockerfile
+      args:
+        INSTALL_DEV: ${INSTALL_DEV-true}
+        INSTALL_JUPYTER: ${INSTALL_JUPYTER-true}
+
+  # -----------------------------
+  # Frontend service
+  # -----------------------------
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        FRONTEND_ENV: dev
+    labels:
+      - traefik.enable=true
+      - traefik.constraint-label-stack=${TRAEFIK_TAG?Variable not set}
+      - traefik.http.routers.${STACK_NAME?Variable not set}-frontend-http.rule=PathPrefix(`/`)
+      - traefik.http.services.${STACK_NAME?Variable not set}-frontend.loadbalancer.server.port=80
+
+# -----------------------------
+# Networks
+# -----------------------------
+networks:
+  traefik-public:
+    # Local dev: no external Traefik network required
+    external: false
